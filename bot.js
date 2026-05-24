@@ -208,9 +208,9 @@ function conectar() {
         reconexionProgramada = false;
         log("CONECTADO", `space=${GATHER_SPACE_ID}`);
         try {
-          // isNpc: true -> entra como un personaje aparte (NPC), en vez de
-          // tomar el control de tu propio avatar de la cuenta.
-          game.enter({ name: NOMBRE_BOT, isNpc: true });
+          // El bot usa su PROPIA cuenta de Gather, así que entra como un
+          // personaje normal y visible (distinto de tu avatar).
+          game.enter({ name: NOMBRE_BOT });
           log("BOT_LISTO", `nombre=${NOMBRE_BOT}`);
         } catch (error) {
           log("ERROR_ENTRADA", error && error.message ? error.message : String(error));
