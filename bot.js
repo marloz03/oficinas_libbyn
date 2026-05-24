@@ -208,7 +208,9 @@ function conectar() {
         reconexionProgramada = false;
         log("CONECTADO", `space=${GATHER_SPACE_ID}`);
         try {
-          game.enter({ name: NOMBRE_BOT });
+          // isNpc: true -> entra como un personaje aparte (NPC), en vez de
+          // tomar el control de tu propio avatar de la cuenta.
+          game.enter({ name: NOMBRE_BOT, isNpc: true });
           log("BOT_LISTO", `nombre=${NOMBRE_BOT}`);
         } catch (error) {
           log("ERROR_ENTRADA", error && error.message ? error.message : String(error));
