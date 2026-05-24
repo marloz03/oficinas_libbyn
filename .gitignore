@@ -1,6 +1,9 @@
 # Dependencias
 node_modules/
 
+# Repositorio de trabajo que el bot clona para programar
+workspace/
+
 # Variables de entorno (¡contienen claves secretas!)
 .env
 .env.*

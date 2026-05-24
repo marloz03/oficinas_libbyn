@@ -1,59 +1,63 @@
 "use strict";
 
 /**
- * Bot "Analista" para Gather.town.
+ * Bot "Analista" para Gather.town — programador del equipo TribuDataYAnalitica.
  *
- * Qué hace:
- *  - Se conecta a un space de Gather y aparece como un avatar llamado "Analista".
- *  - Cada 30 s da un pasito al azar para verse "vivo".
- *  - Cuando alguien le escribe por chat (cerca de él), responde con Claude
- *    (Anthropic) en español y de forma breve.
- *  - Reconecta solo si Gather se cae (con espera incremental).
+ * Comportamiento:
+ *  - Si NO hay otro humano en el espacio  -> se queda IDLE (quieto).
+ *  - Si hay alguien                       -> modo oficinista: camina por la
+ *    oficina de vez en cuando y responde por chat.
+ *  - Cuando un compañero le pide una TAREA de programación por chat, trabaja el
+ *    repositorio con Claude y sube los cambios a una rama "analista/..." (nunca
+ *    a main). Luego reporta la rama en el chat.
  *
- * Todas las claves se leen del archivo .env. NUNCA van escritas aquí.
+ * Todas las claves se leen de .env. La IA usa tu suscripción Claude (Claude
+ * Code), no la API de pago.
  */
 
 require("dotenv").config();
-
-// El SDK de Gather usa el objeto global `WebSocket`. En Node lo proveemos con
-// isomorphic-ws (que por debajo usa el paquete `ws`).
 global.WebSocket = require("isomorphic-ws");
 
-const { Game, MoveDirection } = require("@gathertown/gather-game-client");
-// El Claude Agent SDK es un módulo solo-ESM; se importa más abajo con import().
+const path = require("path");
+const { Game } = require("@gathertown/gather-game-client");
+const { enrutarMensaje } = require("./lib/claude");
+const { ejecutarTarea } = require("./lib/programador");
 
 // ------------------------------ Configuración ------------------------------
 
 const { GATHER_API_KEY, GATHER_SPACE_ID, CLAUDE_CODE_OAUTH_TOKEN } = process.env;
 
-// Respondemos usando tu suscripción de Claude (vía Claude Code), no la API de
-// pago. Quitamos del entorno cualquier credencial o gateway que pudiera tomar
-// prioridad sobre tu token de suscripción (CLAUDE_CODE_OAUTH_TOKEN).
+// La IA usa tu suscripción de Claude. Quitamos credenciales/gateway que pudieran
+// tener prioridad sobre el token de la suscripción.
 delete process.env.ANTHROPIC_API_KEY;
 delete process.env.ANTHROPIC_AUTH_TOKEN;
 delete process.env.ANTHROPIC_BASE_URL;
 
 const NOMBRE_BOT = "Analista";
 const MODELO = "claude-sonnet-4-5";
-const SYSTEM_PROMPT =
-  "Eres un analista de datos del equipo TribuDataYAnalitica de Banco Guayaquil. Responde breve y en español.";
 
-const INTERVALO_MOVIMIENTO_MS = 30_000; // un pasito cada 30 s
+// Repositorio donde programa (opcional: si falta, el modo programador se apaga
+// y el bot solo conversa).
+const REPO_URL = process.env.REPO_URL || "";
+const REPO_DIR = process.env.REPO_DIR
+  ? path.resolve(process.env.REPO_DIR)
+  : path.join(process.cwd(), "workspace", "Libbyn");
+const REPO_NOMBRE = (REPO_URL.split("/").pop() || "el repositorio").replace(/\.git$/, "");
 
-// Tipos de mensaje que NO respondemos (mensajes globales del space).
-// Así el bot solo atiende conversaciones cercanas. Si ves en los logs algún
-// otro tipo global que no quieras responder, agrégalo aquí.
-const TIPOS_IGNORADOS = ["GLOBAL_CHAT"];
+const PASEO_MS = 15_000; // cada cuánto considera dar un pasito (solo si hay gente)
+const TIPOS_IGNORADOS = ["GLOBAL_CHAT"]; // mensajes globales -> no responde
+const MAX_CHAT = 900; // tope de caracteres por mensaje de chat
 
 // ------------------------------ Utilidades --------------------------------
 
 function log(evento, detalle) {
   const ts = new Date().toISOString();
-  if (detalle === undefined || detalle === "") {
-    console.log(`[${ts}] ${evento}`);
-  } else {
-    console.log(`[${ts}] ${evento} :: ${detalle}`);
-  }
+  console.log(detalle ? `[${ts}] ${evento} :: ${detalle}` : `[${ts}] ${evento}`);
+}
+
+function recortar(texto) {
+  const t = (texto || "").trim();
+  return t.length > MAX_CHAT ? t.slice(0, MAX_CHAT - 1) + "…" : t;
 }
 
 function variablesFaltantes() {
@@ -75,131 +79,171 @@ if (faltantes.length > 0) {
   );
   process.exit(1);
 }
-
-// --------------------------- Claude (vía Claude Code) ----------------------
-
-// El Claude Agent SDK es solo-ESM, así que lo cargamos con import() dinámico y
-// guardamos la referencia para no reimportarlo en cada mensaje.
-let _query = null;
-async function obtenerQuery() {
-  if (!_query) {
-    const mod = await import("@anthropic-ai/claude-agent-sdk");
-    _query = mod.query;
-  }
-  return _query;
+if (!REPO_URL) {
+  log("AVISO", "REPO_URL no está configurado: el modo programador queda apagado (solo conversa).");
 }
 
-async function pensarRespuesta(textoUsuario) {
-  const query = await obtenerQuery();
-
-  const iterador = query({
-    prompt: textoUsuario,
-    options: {
-      model: MODELO,
-      systemPrompt: SYSTEM_PROMPT,
-      allowedTools: [], // sin herramientas: solo generar texto (no pide permisos)
-      maxTurns: 1, // una sola respuesta, sin bucles de agente
-    },
-  });
-
-  for await (const mensaje of iterador) {
-    if (mensaje.type === "result") {
-      if (mensaje.subtype === "success") {
-        return (mensaje.result || "").trim() || "(no tengo una respuesta en este momento)";
-      }
-      throw new Error(`Claude Code devolvió un error: ${mensaje.subtype}`);
-    }
-  }
-
-  throw new Error("Claude Code no devolvió ninguna respuesta");
-}
-
-// --------------------------- Estado de conexión ----------------------------
+// --------------------------- Estado del bot --------------------------------
 
 let game;
 let conectado = false;
-let intervaloMovimiento = null;
+let modo = "idle"; // "idle" | "activo"
+let ocupado = false; // true mientras programa una tarea
+let intervaloPaseo = null;
 let intentosReconexion = 0;
 let reconexionProgramada = false;
+
+function miId() {
+  return game && game.engine && game.engine.clientUid;
+}
+
+// ----------------------------- Presencia -----------------------------------
+
+function contarHumanos() {
+  const mi = miId();
+  const jugadores = (game && game.players) || {};
+  return Object.keys(jugadores).filter((id) => id !== mi).length;
+}
+
+function actualizarPresencia() {
+  const humanos = contarHumanos();
+  const nuevoModo = humanos > 0 ? "activo" : "idle";
+  if (nuevoModo !== modo) {
+    modo = nuevoModo;
+    log("MODO", `${modo} (humanos=${humanos})`);
+    aplicarEstadoVisible();
+  }
+}
+
+function aplicarEstadoVisible() {
+  try {
+    if (ocupado) game.setTextStatus("💻 programando…");
+    else if (modo === "activo") game.setTextStatus("🙂 en la oficina");
+    else game.setTextStatus("💤 idle");
+  } catch (_) {
+    /* sin estado, no pasa nada */
+  }
+}
 
 // ----------------------------- Movimiento ----------------------------------
 
 function direccionAleatoria() {
-  const direcciones = [
-    MoveDirection.Left,
-    MoveDirection.Right,
-    MoveDirection.Up,
-    MoveDirection.Down,
-  ];
-  return direcciones[Math.floor(Math.random() * direcciones.length)];
+  // 0=Left 1=Right 2=Up 3=Down (enum MoveDirection)
+  return Math.floor(Math.random() * 4);
 }
 
-function iniciarMovimiento() {
-  detenerMovimiento();
-  intervaloMovimiento = setInterval(() => {
+function darUnPaseo() {
+  const dir = direccionAleatoria();
+  const pasos = 1 + Math.floor(Math.random() * 3); // 1 a 3 pasos
+  let i = 0;
+  const paso = () => {
+    if (i >= pasos) return;
+    i += 1;
     try {
-      const dir = direccionAleatoria();
       game.move(dir);
-      log("MOVIMIENTO", `dir=${MoveDirection[dir]}`);
-    } catch (error) {
-      log("ERROR_MOVIMIENTO", error && error.message ? error.message : String(error));
+    } catch (_) {
+      /* ignorar */
     }
-  }, INTERVALO_MOVIMIENTO_MS);
+    setTimeout(paso, 350);
+  };
+  paso();
+  log("MOVIMIENTO", `dir=${dir} pasos=${pasos}`);
 }
 
-function detenerMovimiento() {
-  if (intervaloMovimiento) {
-    clearInterval(intervaloMovimiento);
-    intervaloMovimiento = null;
+function iniciarComportamiento() {
+  detenerComportamiento();
+  intervaloPaseo = setInterval(() => {
+    // Solo se mueve si hay humanos (activo) y no está programando.
+    if (modo === "activo" && !ocupado) darUnPaseo();
+  }, PASEO_MS);
+}
+
+function detenerComportamiento() {
+  if (intervaloPaseo) {
+    clearInterval(intervaloPaseo);
+    intervaloPaseo = null;
   }
+}
+
+// ------------------------------- Tareas ------------------------------------
+
+function lanzarTarea(tarea, senderId, mapId, quien) {
+  ocupado = true;
+  aplicarEstadoVisible();
+  log("TAREA_LANZADA", `de=${quien} tarea="${tarea}"`);
+
+  ejecutarTarea({ repoUrl: REPO_URL, repoDir: REPO_DIR, modelo: MODELO, tarea, log })
+    .then((res) => {
+      let mensaje;
+      if (res.sinCambios) {
+        mensaje = `Revisé la tarea pero no hizo falta cambiar archivos. ${res.resumen}`;
+      } else {
+        mensaje = `✅ Listo. Subí la rama "${res.rama}" (commit ${res.commit}).\n${res.resumen}`;
+      }
+      enviarChat(senderId, mapId, mensaje);
+      log("TAREA_OK", res.rama || "sin-cambios");
+    })
+    .catch((e) => {
+      enviarChat(senderId, mapId, `Uy, tuve un problema con la tarea: ${e.message}`);
+      log("ERROR_TAREA", e && e.message ? e.message : String(e));
+    })
+    .finally(() => {
+      ocupado = false;
+      aplicarEstadoVisible();
+    });
 }
 
 // ------------------------------- Chat --------------------------------------
 
-function manejarChat(data, context) {
+function enviarChat(destino, mapId, texto) {
   try {
-    const miId = game.engine && game.engine.clientUid;
+    game.chat(destino, [], mapId, { contents: recortar(texto) });
+  } catch (e) {
+    log("ERROR_ENVIO_CHAT", e && e.message ? e.message : String(e));
+  }
+}
 
-    // 1) Ignorar mis propios mensajes (evita un bucle infinito de respuestas).
-    if (miId && data.senderId === miId) return;
-
-    // 2) Ignorar mensajes globales -> el bot solo atiende lo cercano.
+async function manejarChat(data, context) {
+  try {
+    const mi = miId();
+    if (mi && data.senderId === mi) return; // ignorar mis propios mensajes
     if (TIPOS_IGNORADOS.includes(data.messageType)) {
-      log("CHAT_IGNORADO", `tipo=${data.messageType} de=${data.senderName || data.senderId}`);
+      log("CHAT_IGNORADO", `tipo=${data.messageType}`);
       return;
     }
-
     const texto = (data.contents || "").trim();
     if (!texto) return;
 
     const quien = data.senderName || data.senderId;
-    log("MENSAJE_RECIBIDO", `de=${quien} tipo=${data.messageType} texto="${texto}"`);
-
-    // Mapa donde está la persona que escribió (necesario para enviar el chat).
     const mapId = (context && context.player && context.player.map) || data.roomId || "";
+    log("MENSAJE_RECIBIDO", `de=${quien} texto="${texto}"`);
 
-    pensarRespuesta(texto)
-      .then((respuesta) => {
-        // Respondemos directamente a quien escribió (le llega como mensaje suyo).
-        game.chat(data.senderId, [], mapId, { contents: respuesta });
-        log("RESPUESTA_ENVIADA", `a=${quien} texto="${respuesta}"`);
-      })
-      .catch((error) => {
-        log("ERROR_ANTHROPIC", error && error.message ? error.message : String(error));
-      });
-  } catch (error) {
-    log("ERROR_CHAT", error && error.message ? error.message : String(error));
+    if (ocupado) {
+      enviarChat(data.senderId, mapId, "Estoy terminando otra tarea, dame un momento y te atiendo. 🙏");
+      return;
+    }
+
+    const ruta = await enrutarMensaje({ modelo: MODELO, texto, repoNombre: REPO_NOMBRE });
+    enviarChat(data.senderId, mapId, ruta.respuesta);
+    log("RESPUESTA_ENVIADA", `a=${quien}`);
+
+    if (ruta.esTarea && ruta.tarea) {
+      if (!REPO_URL) {
+        enviarChat(data.senderId, mapId, "Me encantaría, pero todavía no tengo configurado el repositorio.");
+        return;
+      }
+      lanzarTarea(ruta.tarea, data.senderId, mapId, quien);
+    }
+  } catch (e) {
+    log("ERROR_CHAT", e && e.message ? e.message : String(e));
   }
 }
 
 // ----------------------------- Conexión ------------------------------------
 
 function conectar() {
-  // Reutilizamos una sola instancia de Game para no duplicar el avatar.
   if (!game) {
-    game = new Game(GATHER_SPACE_ID, () =>
-      Promise.resolve({ apiKey: GATHER_API_KEY })
-    );
+    game = new Game(GATHER_SPACE_ID, () => Promise.resolve({ apiKey: GATHER_API_KEY }));
 
     game.subscribeToConnection((estaConectado) => {
       conectado = estaConectado;
@@ -208,28 +252,31 @@ function conectar() {
         reconexionProgramada = false;
         log("CONECTADO", `space=${GATHER_SPACE_ID}`);
         try {
-          // El bot usa su PROPIA cuenta de Gather, así que entra como un
-          // personaje normal y visible (distinto de tu avatar).
           game.enter({ name: NOMBRE_BOT });
+          game.setName(NOMBRE_BOT);
           log("BOT_LISTO", `nombre=${NOMBRE_BOT}`);
-        } catch (error) {
-          log("ERROR_ENTRADA", error && error.message ? error.message : String(error));
+        } catch (e) {
+          log("ERROR_ENTRADA", e && e.message ? e.message : String(e));
         }
-        iniciarMovimiento();
+        actualizarPresencia();
+        aplicarEstadoVisible();
+        iniciarComportamiento();
       } else {
         log("CONEXION_PERDIDA", "connected=false");
-        detenerMovimiento();
+        detenerComportamiento();
       }
     });
 
     game.subscribeToDisconnection((code, reason) => {
       conectado = false;
       log("DESCONECTADO", `code=${code !== undefined ? code : "?"} reason=${reason || ""}`);
-      detenerMovimiento();
+      detenerComportamiento();
       programarReconexion();
     });
 
     game.subscribeToEvent("playerChats", manejarChat);
+    game.subscribeToEvent("playerJoins", () => actualizarPresencia());
+    game.subscribeToEvent("playerExits", () => actualizarPresencia());
   }
 
   log("CONECTANDO", `space=${GATHER_SPACE_ID}`);
@@ -240,11 +287,8 @@ function programarReconexion() {
   if (reconexionProgramada) return;
   reconexionProgramada = true;
   intentosReconexion += 1;
-
-  // Espera incremental (backoff): 2s, 4s, 8s, 16s, ... máx 30s.
-  const espera = Math.min(30_000, 1000 * 2 ** intentosReconexion);
+  const espera = Math.min(30_000, 1000 * 2 ** intentosReconexion); // backoff, máx 30s
   log("RECONECTANDO", `intento=${intentosReconexion} en ${espera}ms`);
-
   setTimeout(() => {
     reconexionProgramada = false;
     if (conectado) {
@@ -253,8 +297,8 @@ function programarReconexion() {
     }
     try {
       conectar();
-    } catch (error) {
-      log("ERROR_RECONEXION", error && error.message ? error.message : String(error));
+    } catch (e) {
+      log("ERROR_RECONEXION", e && e.message ? e.message : String(e));
       programarReconexion();
     }
   }, espera);
@@ -262,20 +306,20 @@ function programarReconexion() {
 
 // ------------------------------- Arranque ----------------------------------
 
-process.on("unhandledRejection", (error) => {
-  log("ERROR_NO_MANEJADO", error && error.message ? error.message : String(error));
+process.on("unhandledRejection", (e) => {
+  log("ERROR_NO_MANEJADO", e && e.message ? e.message : String(e));
 });
 
 process.on("SIGINT", () => {
   log("APAGANDO", "recibido Ctrl+C");
-  detenerMovimiento();
+  detenerComportamiento();
   try {
     if (game) game.disconnect();
   } catch (_) {
-    // ignorar errores al cerrar
+    /* ignorar */
   }
   process.exit(0);
 });
 
-log("INICIO", `bot="${NOMBRE_BOT}" modelo=${MODELO}`);
+log("INICIO", `bot="${NOMBRE_BOT}" modelo=${MODELO} repo=${REPO_NOMBRE}`);
 conectar();

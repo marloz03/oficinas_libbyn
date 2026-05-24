@@ -1,26 +1,32 @@
 # Bot "Analista" para Gather.town
 
-Prueba de concepto: un bot que aparece como un **avatar pixelado** dentro de un
-espacio de [Gather.town](https://www.gather.town/), se mueve solo de vez en
-cuando y **responde por el chat** usando la API de Anthropic (Claude).
-
-Es la versión mínima para validar la integración antes de escalar.
+Un bot que aparece como un **avatar pixelado** dentro de un espacio de
+[Gather.town](https://www.gather.town/), se comporta como un **oficinista
+programador** y, cuando se lo piden por chat, **programa de verdad** en un
+repositorio de GitHub usando Claude (Claude Code).
 
 ---
 
 ## ¿Qué hace exactamente?
 
 - Se conecta a tu espacio de Gather y entra como un avatar llamado **`Analista`**.
-- Cada **30 segundos** da un pasito al azar para no verse congelado.
-- Cuando alguien le escribe **por chat estando cerca**, responde con el modelo
-  `claude-sonnet-4-5`, en español y de forma breve, con esta personalidad:
+- **Detecta si hay alguien más** en el espacio:
+  - Si **no hay nadie** → se queda **IDLE** (quieto, estado 💤).
+  - Si **hay alguien** → modo **oficinista**: camina por la oficina de vez en
+    cuando (estado 🙂) y responde por chat.
+- Responde el chat cercano como un **programador** del equipo TribuDataYAnalitica
+  de Banco Guayaquil, breve y en español (modelo `claude-sonnet-4-5`).
+- Cuando un compañero le pide una **tarea de programación** por chat:
+  1. confirma que se pone con eso (estado 💻),
+  2. trabaja el repositorio configurado (`REPO_URL`) con Claude,
+  3. hace commit y **push a una rama `analista/...`** (NUNCA a `main`),
+  4. reporta en el chat la rama y un resumen.
+- Si Gather se cae, **intenta reconectarse solo**.
+- Imprime en consola un registro con hora de cada evento importante.
 
-  > "Eres un analista de datos del equipo TribuDataYAnalitica de Banco Guayaquil.
-  > Responde breve y en español."
-
-- Si Gather se cae, **intenta reconectarse solo** (esperando cada vez un poco más).
-- Imprime en consola un registro con hora de cada evento importante
-  (conexión, mensaje recibido, respuesta enviada, errores).
+> ⚠️ El modo programador hace **push autónomo** a ramas `analista/...`. Nunca
+> toca `main` ni hace force-push, así que siempre puedes revisar o borrar lo que
+> suba. Aun así, revisa sus ramas antes de fusionarlas.
 
 ---
 
@@ -33,6 +39,10 @@ Es la versión mínima para validar la integración antes de escalar.
 2. Una cuenta en **Gather.town** y un espacio (space) creado.
 3. Una suscripción **Claude Pro o Max** (la misma de claude.ai). El bot la usa
    mediante **Claude Code**, así que **no necesitas API key de pago**.
+4. (Para el modo programador) **git instalado y con permiso de push** al
+   repositorio (`git push` debe funcionarte ahí normalmente), y correr el bot
+   como **usuario normal** (no root/sudo): el agente de código necesita permisos
+   no interactivos que se bloquean si corres como root.
 
 ---
 
@@ -103,7 +113,11 @@ Esto se hace **en tu computadora** (el login abre tu navegador):
    GATHER_API_KEY=tu_api_key_de_gather
    GATHER_SPACE_ID=AbCd1234efGh\MiEspacio
    CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat...
+   # Modo programador (opcional). Si lo dejas vacío, el bot solo conversa.
+   REPO_URL=https://github.com/marloz03/Libbyn.git
+   REPO_DIR=
    ```
+   > `REPO_DIR` es opcional: por defecto clona el repo en `./workspace/Libbyn`.
 
    > ⚠️ **Nunca compartas ni subas el archivo `.env`.** Ya está protegido por
    > `.gitignore` para que no se suba a git por error.
@@ -144,13 +158,30 @@ Para **detener** el bot, presiona `Ctrl + C` en la terminal.
 | `CONECTANDO`        | Intentando conectar al space.                           |
 | `CONECTADO`         | Conexión establecida con Gather.                        |
 | `BOT_LISTO`         | El avatar "Analista" ya entró al mapa.                  |
-| `MOVIMIENTO`        | El bot dio un pasito (cada 30 s).                       |
+| `MODO`              | Cambió entre `idle` (nadie) y `activo` (hay gente).     |
+| `MOVIMIENTO`        | El bot dio un pasito (solo en modo activo).             |
 | `MENSAJE_RECIBIDO`  | Alguien le escribió por chat.                           |
 | `RESPUESTA_ENVIADA` | El bot contestó (texto generado por Claude).            |
+| `TAREA_LANZADA`     | Detectó una tarea de programación y empezó a trabajarla.|
+| `CODIGO_RAMA`       | Creó la rama `analista/...` para la tarea.              |
+| `CODIGO_PUSH`       | Subió la rama con los cambios.                          |
+| `TAREA_OK`          | Terminó la tarea (rama subida o sin cambios).           |
 | `CHAT_IGNORADO`     | Mensaje global ignorado (el bot solo atiende cercanos). |
 | `DESCONECTADO`      | Se perdió la conexión con Gather.                       |
 | `RECONECTANDO`      | Reintentando conexión tras una caída.                   |
 | `ERROR_*`           | Ocurrió un error (config, chat, Anthropic, etc.).       |
+
+---
+
+## Pedirle que programe
+
+Estando cerca de "Analista" en el mapa, escríbele por chat una tarea, por ejemplo:
+
+> "Analista, agrega un archivo CONTRIBUTING.md con las reglas de contribución"
+
+Él decide si es una tarea o solo charla. Si es tarea: trabaja el repo, sube una
+rama `analista/...` y te dice cuál en el chat. Luego revisa esa rama en GitHub
+y, si te gusta, la fusionas tú.
 
 ---
 
@@ -177,5 +208,10 @@ Para **detener** el bot, presiona `Ctrl + C` en la terminal.
 - **Motor de IA:** `@anthropic-ai/claude-agent-sdk` (el SDK de Claude Code),
   autenticado con tu suscripción Max/Pro vía `CLAUDE_CODE_OAUTH_TOKEN`. No usa
   la API de pago.
+- **Estructura:** `bot.js` (conexión, presencia, movimiento, ruteo de chat),
+  `lib/claude.js` (decide si un mensaje es tarea o charla y genera la respuesta),
+  `lib/programador.js` (git + agente de Claude que programa y sube la rama).
+- **Seguridad del modo programador:** siempre rama `analista/...`, nunca `main`,
+  nunca `--force`. El push usa las credenciales de git de tu máquina.
 - **Sin TypeScript:** JavaScript plano (CommonJS) para reducir fricción.
 - Las claves se leen siempre desde `.env`; **nunca** están escritas en el código.
