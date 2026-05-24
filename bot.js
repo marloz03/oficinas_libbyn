@@ -27,9 +27,11 @@ const { Game, MoveDirection } = require("@gathertown/gather-game-client");
 const { GATHER_API_KEY, GATHER_SPACE_ID, CLAUDE_CODE_OAUTH_TOKEN } = process.env;
 
 // Respondemos usando tu suscripción de Claude (vía Claude Code), no la API de
-// pago. Si hubiera una API key suelta en el entorno, la quitamos para que NO
-// tome prioridad sobre el token de la suscripción.
+// pago. Quitamos del entorno cualquier credencial o gateway que pudiera tomar
+// prioridad sobre tu token de suscripción (CLAUDE_CODE_OAUTH_TOKEN).
 delete process.env.ANTHROPIC_API_KEY;
+delete process.env.ANTHROPIC_AUTH_TOKEN;
+delete process.env.ANTHROPIC_BASE_URL;
 
 const NOMBRE_BOT = "Analista";
 const MODELO = "claude-sonnet-4-5";
@@ -95,8 +97,7 @@ async function pensarRespuesta(textoUsuario) {
     options: {
       model: MODELO,
       systemPrompt: SYSTEM_PROMPT,
-      allowedTools: [], // sin herramientas: solo generar texto
-      permissionMode: "bypassPermissions", // headless, sin preguntas interactivas
+      allowedTools: [], // sin herramientas: solo generar texto (no pide permisos)
       maxTurns: 1, // una sola respuesta, sin bucles de agente
     },
   });
