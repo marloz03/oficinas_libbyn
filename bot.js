@@ -20,11 +20,16 @@ require("dotenv").config();
 global.WebSocket = require("isomorphic-ws");
 
 const { Game, MoveDirection } = require("@gathertown/gather-game-client");
-const Anthropic = require("@anthropic-ai/sdk");
+// El Claude Agent SDK es un módulo solo-ESM; se importa más abajo con import().
 
 // ------------------------------ Configuración ------------------------------
 
-const { GATHER_API_KEY, GATHER_SPACE_ID, ANTHROPIC_API_KEY } = process.env;
+const { GATHER_API_KEY, GATHER_SPACE_ID, CLAUDE_CODE_OAUTH_TOKEN } = process.env;
+
+// Respondemos usando tu suscripción de Claude (vía Claude Code), no la API de
+// pago. Si hubiera una API key suelta en el entorno, la quitamos para que NO
+// tome prioridad sobre el token de la suscripción.
+delete process.env.ANTHROPIC_API_KEY;
 
 const NOMBRE_BOT = "Analista";
 const MODELO = "claude-sonnet-4-5";
@@ -32,7 +37,6 @@ const SYSTEM_PROMPT =
   "Eres un analista de datos del equipo TribuDataYAnalitica de Banco Guayaquil. Responde breve y en español.";
 
 const INTERVALO_MOVIMIENTO_MS = 30_000; // un pasito cada 30 s
-const MAX_TOKENS_RESPUESTA = 400; // respuestas breves
 
 // Tipos de mensaje que NO respondemos (mensajes globales del space).
 // Así el bot solo atiende conversaciones cercanas. Si ves en los logs algún
@@ -54,7 +58,7 @@ function variablesFaltantes() {
   const faltan = [];
   if (!GATHER_API_KEY) faltan.push("GATHER_API_KEY");
   if (!GATHER_SPACE_ID) faltan.push("GATHER_SPACE_ID");
-  if (!ANTHROPIC_API_KEY) faltan.push("ANTHROPIC_API_KEY");
+  if (!CLAUDE_CODE_OAUTH_TOKEN) faltan.push("CLAUDE_CODE_OAUTH_TOKEN");
   return faltan;
 }
 
@@ -70,25 +74,43 @@ if (faltantes.length > 0) {
   process.exit(1);
 }
 
-// ------------------------------ Anthropic ----------------------------------
+// --------------------------- Claude (vía Claude Code) ----------------------
 
-const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+// El Claude Agent SDK es solo-ESM, así que lo cargamos con import() dinámico y
+// guardamos la referencia para no reimportarlo en cada mensaje.
+let _query = null;
+async function obtenerQuery() {
+  if (!_query) {
+    const mod = await import("@anthropic-ai/claude-agent-sdk");
+    _query = mod.query;
+  }
+  return _query;
+}
 
 async function pensarRespuesta(textoUsuario) {
-  const respuesta = await anthropic.messages.create({
-    model: MODELO,
-    max_tokens: MAX_TOKENS_RESPUESTA,
-    system: SYSTEM_PROMPT,
-    messages: [{ role: "user", content: textoUsuario }],
+  const query = await obtenerQuery();
+
+  const iterador = query({
+    prompt: textoUsuario,
+    options: {
+      model: MODELO,
+      systemPrompt: SYSTEM_PROMPT,
+      allowedTools: [], // sin herramientas: solo generar texto
+      permissionMode: "bypassPermissions", // headless, sin preguntas interactivas
+      maxTurns: 1, // una sola respuesta, sin bucles de agente
+    },
   });
 
-  const texto = (respuesta.content || [])
-    .filter((bloque) => bloque.type === "text")
-    .map((bloque) => bloque.text)
-    .join("\n")
-    .trim();
+  for await (const mensaje of iterador) {
+    if (mensaje.type === "result") {
+      if (mensaje.subtype === "success") {
+        return (mensaje.result || "").trim() || "(no tengo una respuesta en este momento)";
+      }
+      throw new Error(`Claude Code devolvió un error: ${mensaje.subtype}`);
+    }
+  }
 
-  return texto || "(no tengo una respuesta en este momento)";
+  throw new Error("Claude Code no devolvió ninguna respuesta");
 }
 
 // --------------------------- Estado de conexión ----------------------------

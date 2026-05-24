@@ -31,7 +31,8 @@ Es la versión mínima para validar la integración antes de escalar.
    node -v
    ```
 2. Una cuenta en **Gather.town** y un espacio (space) creado.
-3. Una cuenta en **Anthropic** con una API key (https://console.anthropic.com).
+3. Una suscripción **Claude Pro o Max** (la misma de claude.ai). El bot la usa
+   mediante **Claude Code**, así que **no necesitas API key de pago**.
 
 ---
 
@@ -63,12 +64,25 @@ Es la versión mínima para validar la integración antes de escalar.
 
 ---
 
-## Paso 3 — Obtener tu API key de Anthropic
+## Paso 3 — Conseguir tu token de Claude (con tu suscripción Max/Pro)
 
-1. Ve a https://console.anthropic.com e inicia sesión.
-2. Entra a **"API Keys"** y crea una nueva.
-3. Cópiala. Esta es tu `ANTHROPIC_API_KEY`.
-   > Solo se muestra una vez al crearla; si la pierdes, genera otra.
+El bot responde usando tu suscripción de Claude, no una API de pago. Para eso
+necesita un **token** que se genera iniciando sesión una vez con tu cuenta.
+Esto se hace **en tu computadora** (el login abre tu navegador):
+
+1. Instala **Claude Code** (necesitas Node.js). En una terminal:
+   ```bash
+   npm install -g @anthropic-ai/claude-code
+   ```
+2. Genera el token:
+   ```bash
+   claude setup-token
+   ```
+3. Se abrirá tu navegador para **iniciar sesión con tu cuenta Claude (Max/Pro)**
+   y autorizar. Al terminar, la terminal te mostrará un token largo que empieza
+   con `sk-ant-oat...`. **Cópialo.**
+   > Este token es tu `CLAUDE_CODE_OAUTH_TOKEN`. Trátalo como secreto; dura
+   > aproximadamente un año y puedes regenerarlo cuando quieras.
 
 ---
 
@@ -88,7 +102,7 @@ Es la versión mínima para validar la integración antes de escalar.
    ```env
    GATHER_API_KEY=tu_api_key_de_gather
    GATHER_SPACE_ID=AbCd1234efGh\MiEspacio
-   ANTHROPIC_API_KEY=tu_api_key_de_anthropic
+   CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat...
    ```
 
    > ⚠️ **Nunca compartas ni subas el archivo `.env`.** Ya está protegido por
@@ -147,8 +161,9 @@ Para **detener** el bot, presiona `Ctrl + C` en la terminal.
 - **No aparece el avatar** → Confirma que el `GATHER_SPACE_ID` use la **barra
   invertida** (`\`) y coincida exactamente con tu URL. Verifica que la
   `GATHER_API_KEY` sea válida.
-- **`ERROR_ANTHROPIC`** → Suele ser una `ANTHROPIC_API_KEY` inválida o sin
-  saldo/crédito en la consola de Anthropic.
+- **`ERROR_ANTHROPIC`** → Suele ser un `CLAUDE_CODE_OAUTH_TOKEN` inválido o
+  vencido. Vuelve a generarlo con `claude setup-token` y actualiza el `.env`.
+  Si el error menciona `authentication_failed`, es exactamente eso.
 - **No responde a un mensaje** → Asegúrate de estar **cerca** del avatar al
   escribir (el bot solo atiende el chat cercano). Mira los logs: si ves
   `MENSAJE_RECIBIDO` pero no `RESPUESTA_ENVIADA`, revisa el error de Anthropic.
@@ -159,6 +174,8 @@ Para **detener** el bot, presiona `Ctrl + C` en la terminal.
 
 - **SDK de Gather:** `@gathertown/gather-game-client` (v43, la versión oficial
   vigente). Se conecta por WebSocket; en Node se usa `isomorphic-ws` + `ws`.
-- **SDK de IA:** `@anthropic-ai/sdk` directo (no Claude Code SDK).
+- **Motor de IA:** `@anthropic-ai/claude-agent-sdk` (el SDK de Claude Code),
+  autenticado con tu suscripción Max/Pro vía `CLAUDE_CODE_OAUTH_TOKEN`. No usa
+  la API de pago.
 - **Sin TypeScript:** JavaScript plano (CommonJS) para reducir fricción.
 - Las claves se leen siempre desde `.env`; **nunca** están escritas en el código.
